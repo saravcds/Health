@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Face Vitals Scanner</title>
+<style>
+  :root{
+    --bg:#0b1220; --panel:#121b2e; --panel2:#182541; --accent:#4fd1c5; --accent2:#7c9cff;
+    --text:#eaf0ff; --muted:#93a3c2; --good:#4fd17c; --fair:#f5c542; --poor:#f5615c; --danger:#f5615c;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:linear-gradient(160deg,#0b1220,#0f1b33);color:var(--text);min-height:100vh;}
+  #app{max-width:720px;margin:0 auto;padding:24px 16px 60px;}
+  header{text-align:center;margin-bottom:20px;}
+  header h1{font-size:1.5rem;margin:0 0 4px;background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent;}
+  header p{color:var(--muted);margin:0;font-size:0.9rem;}
+  .card{background:var(--panel);border:1px solid #223055;border-radius:16px;padding:20px;margin-bottom:16px;}
+  .disclaimer{background:#241a12;border:1px solid #5a3d1a;color:#f5c542;border-radius:12px;padding:12px 14px;font-size:0.82rem;line-height:1.4;margin-bottom:16px;}
+  .disclaimer b{color:#ffd873;}
+  button{cursor:pointer;border:none;border-radius:10px;padding:12px 20px;font-size:0.95rem;font-weight:600;transition:transform .1s, opacity .1s;}
+  button:active{transform:scale(0.97);}
+  .btn-primary{background:linear-gradient(90deg,var(--accent),var(--accent2));color:#08111f;width:100%;}
+  .btn-secondary{background:var(--panel2);color:var(--text);border:1px solid #2c3c66;}
+  .btn-row{display:flex;gap:10px;margin-top:12px;}
+  .btn-row button{flex:1;}
+  ul.tips{margin:10px 0 0;padding-left:20px;color:var(--muted);font-size:0.88rem;line-height:1.6;}
+  #screen-scan .video-wrap{position:relative;width:100%;max-width:400px;aspect-ratio:1/1;margin:0 auto;border-radius:16px;overflow:hidden;background:#000;}
+  #video{width:100%;height:100%;object-fit:cover;transform:scaleX(-1);}
+  #overlay{position:absolute;inset:0;pointer-events:none;}
+  .status-row{display:flex;justify-content:space-between;align-items:center;margin-top:14px;font-size:0.85rem;color:var(--muted);}
+  .progress-bar{width:100%;height:8px;background:#0c1830;border-radius:6px;overflow:hidden;margin-top:10px;}
+  .progress-fill{height:100%;width:0%;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .2s linear;}
+  .center{text-align:center;}
+  .spinner{width:40px;height:40px;border:4px solid #223055;border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite;margin:20px auto;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  .metrics-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+  .metric{background:var(--panel2);border-radius:14px;padding:16px;border:1px solid #223055;}
+  .metric .label{font-size:0.78rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;}
+  .metric .value{font-size:1.7rem;font-weight:700;margin:4px 0 2px;}
+  .metric .unit{font-size:0.8rem;color:var(--muted);}
+  .metric .tag{display:inline-block;margin-top:6px;font-size:0.72rem;padding:2px 8px;border-radius:20px;background:#0c1830;}
+  .tag.good{color:var(--good);} .tag.fair{color:var(--fair);} .tag.poor{color:var(--poor);}
+  canvas.chart{width:100%;height:120px;background:#0c1830;border-radius:10px;}
+  .quality-badge{display:inline-flex;align-items:center;gap:6px;font-size:0.85rem;padding:6px 12px;border-radius:20px;background:#0c1830;}
+  .dot{width:8px;height:8px;border-radius:50%;}
+  #screen-error{display:none;}
+  .hidden{display:none !important;}
+  footer{text-align:center;color:var(--muted);font-size:0.75rem;margin-top:24px;}
+  @media print{
+    body{background:#fff;color:#000;}
+    button, #screen-intro, #screen-scan, #screen-processing, footer, .no-print{display:none !important;}
+    .card{border:1px solid #ccc;}
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Face Vitals Scanner</h1>
+    <p>Camera-based wellness estimate &mdash; heart rate, HRV, respiration &amp; stress</p>
+  </header>
+
+  <div class="disclaimer">
+    <b>Not a medical device.</b> This tool provides experimental, informational estimates only using ordinary webcam video. It is not clinically validated, must not be used to diagnose or monitor any health condition, and should never replace a real pulse oximeter, ECG, or medical professional. If you have health concerns, please consult a doctor.
+  </div>
+
+  <!-- INTRO -->
+  <div id="screen-intro" class="card">
+    <h2 style="margin-top:0;">How it works</h2>
+    <p style="color:var(--muted);font-size:0.9rem;line-height:1.5;">
+      Position your face in the oval, hold still in good, even lighting for about 25 seconds. The app analyzes tiny color changes in your skin caused by blood flow (a technique called remote photoplethysmography, or rPPG) to estimate your vitals &mdash; entirely in your browser. No video is uploaded or stored anywhere.
+    </p>
+    <ul class="tips">
+      <li>Face a light source (window/lamp) &mdash; avoid strong backlight</li>
+      <li>Keep your face centered and still during the scan</li>
+      <li>Remove glasses/masks if possible for a cleaner signal</li>
+    </ul>
+    <button class="btn-primary" id="btn-start" style="margin-top:16px;">Start Scan</button>
+  </div>
+
+  <!-- ERROR -->
+  <div id="screen-error" class="card">
+    <h2 style="margin-top:0;color:var(--poor);">Camera unavailable</h2>
+    <p id="error-msg" style="color:var(--muted);"></p>
+    <button class="btn-secondary" id="btn-retry">Try Again</button>
+  </div>
+
+  <!-- SCAN -->
+  <div id="screen-scan" class="card hidden">
+    <div class="video-wrap">
+      <video id="video" autoplay playsinline muted></video>
+      <svg id="overlay" viewBox="0 0 400 400">
+        <ellipse cx="200" cy="205" rx="115" ry="150" fill="none" stroke="#4fd1c5" stroke-width="3" stroke-dasharray="6 6" opacity="0.85"/>
+        <rect x="150" y="95" width="100" height="55" rx="8" fill="none" stroke="#7c9cff" stroke-width="2" opacity="0.7"/>
+      </svg>
+    </div>
+    <div class="status-row">
+      <span id="scan-status">Align your face with the oval&hellip;</span>
+      <span id="scan-timer">0s / 25s</span>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+    <div class="btn-row">
+      <button class="btn-secondary" id="btn-cancel">Cancel</button>
+    </div>
+  </div>
+
+  <!-- PROCESSING -->
+  <div id="screen-processing" class="card hidden center">
+    <div class="spinner"></div>
+    <p style="color:var(--muted);">Analyzing your pulse signal&hellip;</p>
+  </div>
+
+  <!-- REPORT -->
+  <div id="screen-report" class="card hidden">
+    <h2 style="margin-top:0;">Your Vitals Report</h2>
+    <p style="color:var(--muted);font-size:0.82rem;margin-top:-8px;" id="report-timestamp"></p>
+
+    <div class="quality-badge no-print" style="margin-bottom:16px;">
+      <span class="dot" id="quality-dot"></span>
+      <span id="quality-text">Signal quality: &mdash;</span>
+    </div>
+
+    <canvas id="waveform" class="chart"></canvas>
+
+    <div class="metrics-grid" style="margin-top:16px;">
+      <div class="metric">
+        <div class="label">Heart Rate</div>
+        <div class="value"><span id="m-hr">&mdash;</span><span class="unit"> bpm</span></div>
+        <div class="tag" id="m-hr-tag"></div>
+      </div>
+      <div class="metric">
+        <div class="label">HRV (RMSSD)</div>
+        <div class="value"><span id="m-hrv">&mdash;</span><span class="unit"> ms</span></div>
+        <div class="tag" id="m-hrv-tag"></div>
+      </div>
+      <div class="metric">
+        <div class="label">Respiration Rate</div>
+        <div class="value"><span id="m-rr">&mdash;</span><span class="unit"> br/min</span></div>
+        <div class="tag" id="m-rr-tag"></div>
+      </div>
+      <div class="metric">
+        <div class="label">Stress Index</div>
+        <div class="value"><span id="m-stress">&mdash;</span><span class="unit"> /100</span></div>
+        <div class="tag" id="m-stress-tag"></div>
+      </div>
+      <div class="metric" style="grid-column:1/-1;">
+        <div class="label">Estimated SpO&#8322; <span style="font-weight:400;">(experimental &mdash; camera-based, not clinically valid)</span></div>
+        <div class="value"><span id="m-spo2">&mdash;</span><span class="unit"> %</span></div>
+      </div>
+    </div>
+
+    <div class="btn-row no-print">
+      <button class="btn-secondary" id="btn-rescan">Scan Again</button>
+      <button class="btn-primary" id="btn-print">Print / Save as PDF</button>
+    </div>
+  </div>
+
+  <footer>All processing happens locally in your browser. Nothing is uploaded.</footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  // ---------- CONFIG ----------
+  const CANVAS_SIZE = 400;
+  const SCAN_SECONDS = 25;
+  const TARGET_FS = 30; // resample target sampling rate (Hz)
+  const HR_BAND = [0.7, 4.0];     // 42-240 bpm
+  const RESP_BAND = [0.1, 0.5];   // 6-30 breaths/min
+  // ROI rectangle in the 400x400 processing canvas (forehead band, matches SVG guide rect)
+  const ROI = { x: 150, y: 95, w: 100, h: 55 };
+
+  // ---------- DOM ----------
+  const screens = {
+    intro: document.getElementById('screen-intro'),
+    error: document.getElementById('screen-error'),
+    scan: document.getElementById('screen-scan'),
+    processing: document.getElementById('screen-processing'),
+    report: document.getElementById('screen-report'),
+  };
+  const video = document.getElementById('video');
+  const btnStart = document.getElementById('btn-start');
+  const btnRetry = document.getElementById('btn-retry');
+  const btnCancel = document.getElementById('btn-cancel');
+  const btnRescan = document.getElementById('btn-rescan');
+  const btnPrint = document.getElementById('btn-print');
+  const errorMsg = document.getElementById('error-msg');
+  const scanTimer = document.getElementById('scan-timer');
+  const scanStatus = document.getElementById('scan-status');
+  const progressFill = document.getElementById('progress-fill');
+
+  let stream = null;
+  let procCanvas = document.createElement('canvas');
+  procCanvas.width = CANVAS_SIZE; procCanvas.height = CANVAS_SIZE;
+  let procCtx = procCanvas.getContext('2d', { willReadFrequently: true });
+
+  let samples = [];      // {t, r, g, b}
+  let scanStartTime = 0;
+  let rafId = null;
+  let scanTimeoutId = null;
+
+  function showScreen(name){
+    Object.values(screens).forEach(s => s.classList.add('hidden'));
+    screens[name].classList.remove('hidden');
+  }
+
+  // ---------- CAMERA ----------
+  async function startCamera(){
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 640 } },
+        audio: false
+      });
+      video.srcObject = stream;
+      await video.play();
+      beginScan();
+    }catch(err){
+      errorMsg.textContent = (err && err.message) ? err.message : 'Could not access the camera. Please check permissions and try again.';
+      showScreen('error');
+    }
+  }
+
+  function stopCamera(){
+    if (stream){
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+    }
+  }
+
+  // ---------- SCAN LOOP ----------
+  function beginScan(){
+    samples = [];
+    scanStartTime = performance.now();
+    showScreen('scan');
+    scanStatus.textContent = 'Hold still… capturing signal';
+    progressFill.style.width = '0%';
+    sampleFrame();
+    scanTimeoutId = setTimeout(finishScan, SCAN_SECONDS * 1000);
+  }
+
+  function sampleFrame(){
+    const now = performance.now();
+    const elapsed = (now - scanStartTime) / 1000;
+    if (elapsed >= SCAN_SECONDS) return; // timeout will call finishScan
+
+    if (video.videoWidth > 0){
+      // Emulate object-fit:cover crop into a square CANVAS_SIZE x CANVAS_SIZE
+      const vw = video.videoWidth, vh = video.videoHeight;
+      const side = Math.min(vw, vh);
+      const sx = (vw - side) / 2, sy = (vh - side) / 2;
+      procCtx.save();
+      // mirror to match the visually mirrored <video> so ROI aligns with what user sees
+      procCtx.translate(CANVAS_SIZE, 0);
+      procCtx.scale(-1, 1);
+      procCtx.drawImage(video, sx, sy, side, side, 0, 0, CANVAS_SIZE, CANVAS_SIZE);
+      procCtx.restore();
+
+      try{
+        const frame = procCtx.getImageData(ROI.x, ROI.y, ROI.w, ROI.h).data;
+        let rSum=0,gSum=0,bSum=0; const n = frame.length/4;
+        for (let i=0;i<frame.length;i+=4){ rSum+=frame[i]; gSum+=frame[i+1]; bSum+=frame[i+2]; }
+        samples.push({ t: elapsed, r: rSum/n, g: gSum/n, b: bSum/n });
+      }catch(e){ /* ignore transient read errors */ }
+    }
+
+    scanTimer.textContent = `${elapsed.toFixed(0)}s / ${SCAN_SECONDS}s`;
+    progressFill.style.width = `${Math.min(100, (elapsed/SCAN_SECONDS)*100)}%`;
+
+    rafId = requestAnimationFrame(sampleFrame);
+  }
+
+  function finishScan(){
+    if (rafId) cancelAnimationFrame(rafId);
+    if (scanTimeoutId) clearTimeout(scanTimeoutId);
+    stopCamera();
+    showScreen('processing');
+    // let UI paint before heavy compute
+    setTimeout(() => {
+      try{
+        const result = analyze(samples);
+        renderReport(result);
+        showScreen('report');
+      }catch(e){
+        errorMsg.textContent = 'Not enough signal was captured to produce a report. Please try again with better lighting and less movement.';
+        showScreen('error');
+      }
+    }, 50);
+  }
+
+  function cancelScan(){
+    if (rafId) cancelAnimationFrame(rafId);
+    if (scanTimeoutId) clearTimeout(scanTimeoutId);
+    stopCamera();
+    showScreen('intro');
+  }
+
+  // ---------- MATH HELPERS ----------
+  function mean(arr){ let s=0; for(let i=0;i<arr.length;i++) s+=arr[i]; return s/arr.length; }
+  function std(arr){ const m = mean(arr); let s=0; for(let i=0;i<arr.length;i++) s += (arr[i]-m)*(arr[i]-m); return Math.sqrt(s/arr.length); }
+
+  function nextPow2(n){ let p=1; while(p<n) p*=2; return p; }
+
+  // In-place iterative radix-2 FFT. re/im are Float64Array of length = power of 2.
+  function fft(re, im){
+    const n = re.length;
+    for (let i=1,j=0;i<n;i++){
+      let bit = n>>1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      if (i<j){
+        let tr=re[i]; re[i]=re[j]; re[j]=tr;
+        let ti=im[i]; im[i]=im[j]; im[j]=ti;
+      }
+    }
+    for (let len=2; len<=n; len<<=1){
+      const ang = -2*Math.PI/len;
+      const wr = Math.cos(ang), wi = Math.sin(ang);
+      for (let i=0;i<n;i+=len){
+        let curWr=1, curWi=0;
+        for (let j=0;j<len/2;j++){
+          const ur=re[i+j], ui=im[i+j];
+          const vr = re[i+j+len/2]*curWr - im[i+j+len/2]*curWi;
+          const vi = re[i+j+len/2]*curWi + im[i+j+len/2]*curWr;
+          re[i+j] = ur+vr; im[i+j] = ui+vi;
+          re[i+j+len/2] = ur-vr; im[i+j+len/2] = ui-vi;
+          const nwr = curWr*wr - curWi*wi;
+          const nwi = curWr*wi + curWi*wr;
+          curWr = nwr; curWi = nwi;
+        }
+      }
+    }
+  }
+
+  function ifft(re, im){
+    const n = re.length;
+    for (let i=0;i<n;i++) im[i] = -im[i];
+    fft(re, im);
+    for (let i=0;i<n;i++){ re[i] = re[i]/n; im[i] = -im[i]/n; }
+  }
+
+  // Tukey (tapered-cosine) window: flat in the middle, cosine taper at the edges. Reduces spectral
+  // leakage from analyzing a short, non-periodic segment without discarding much of the signal.
+  function tukeyWindow(n, alphaFrac){
+    const w = new Array(n);
+    const taper = Math.max(1, Math.floor(alphaFrac * (n-1) / 2));
+    for (let i=0;i<n;i++){
+      if (i < taper) w[i] = 0.5*(1+Math.cos(Math.PI*(i/taper - 1)));
+      else if (i > n-1-taper) w[i] = 0.5*(1+Math.cos(Math.PI*((i-(n-1-taper))/taper)));
+      else w[i] = 1;
+    }
+    return w;
+  }
+
+  // Zero out FFT bins outside [lowHz, highHz], return filtered time-domain signal (same length as input)
+  function bandpass(signal, fs, lowHz, highHz){
+    const N = nextPow2(signal.length);
+    const re = new Float64Array(N), im = new Float64Array(N);
+    const win = tukeyWindow(signal.length, 0.2);
+    for (let i=0;i<signal.length;i++) re[i]=signal[i]*win[i];
+    fft(re, im);
+    for (let k=0;k<N;k++){
+      const f = (k <= N/2 ? k : k-N) * fs / N;
+      const af = Math.abs(f);
+      if (af < lowHz || af > highHz){ re[k]=0; im[k]=0; }
+    }
+    ifft(re, im);
+    return Array.from(re.slice(0, signal.length));
+  }
+
+  // Return {freqHz, magnitude} of the strongest frequency component within [lowHz,highHz]
+  function dominantFrequency(signal, fs, lowHz, highHz){
+    const N = nextPow2(signal.length);
+    const re = new Float64Array(N), im = new Float64Array(N);
+    const m = mean(signal);
+    const win = tukeyWindow(signal.length, 0.2);
+    for (let i=0;i<signal.length;i++) re[i]=(signal[i]-m)*win[i]; // remove DC, taper edges
+    fft(re, im);
+    let bestMag = -1, bestFreq = 0, bandEnergy = 0;
+    for (let k=0;k<=N/2;k++){
+      const f = k*fs/N;
+      if (f < lowHz || f > highHz) continue;
+      const mag = Math.sqrt(re[k]*re[k] + im[k]*im[k]);
+      bandEnergy += mag;
+      if (mag > bestMag){ bestMag = mag; bestFreq = f; }
+    }
+    return { freqHz: bestFreq, magnitude: bestMag, bandEnergy };
+  }
+
+  function movingAverageDetrend(x, windowSize){
+    const n = x.length;
+    const out = new Array(n);
+    const cumsum = new Array(n+1).fill(0);
+    for (let i=0;i<n;i++) cumsum[i+1] = cumsum[i] + x[i];
+    for (let i=0;i<n;i++){
+      const lo = Math.max(0, i - Math.floor(windowSize/2));
+      const hi = Math.min(n, i + Math.floor(windowSize/2));
+      const avg = (cumsum[hi]-cumsum[lo]) / (hi-lo);
+      out[i] = x[i] - avg;
+    }
+    return out;
+  }
+
+  function zscore(x){
+    const m = mean(x), s = std(x) || 1;
+    return x.map(v => (v-m)/s);
+  }
+
+  function resampleUniform(samples, fs){
+    const t0 = samples[0].t, t1 = samples[samples.length-1].t;
+    const duration = t1 - t0;
+    const n = Math.floor(duration * fs);
+    const r = new Array(n), g = new Array(n), b = new Array(n);
+    let idx = 0;
+    for (let i=0;i<n;i++){
+      const target = t0 + i/fs;
+      while (idx < samples.length-2 && samples[idx+1].t < target) idx++;
+      const s0 = samples[idx], s1 = samples[Math.min(idx+1, samples.length-1)];
+      const span = (s1.t - s0.t) || 1e-6;
+      const frac = Math.max(0, Math.min(1, (target - s0.t) / span));
+      r[i] = s0.r + (s1.r - s0.r)*frac;
+      g[i] = s0.g + (s1.g - s0.g)*frac;
+      b[i] = s0.b + (s1.b - s0.b)*frac;
+    }
+    return { r, g, b, fs, n };
+  }
+
+  function findPeaks(signal, fs, maxBpm){
+    const minDist = Math.max(1, Math.round(fs * 60 / maxBpm));
+    const threshold = std(signal) * 0.35;
+    const peaks = [];
+    for (let i=1;i<signal.length-1;i++){
+      if (signal[i] > signal[i-1] && signal[i] >= signal[i+1] && signal[i] > threshold){
+        if (peaks.length === 0 || (i - peaks[peaks.length-1]) >= minDist){
+          peaks.push(i);
+        } else if (signal[i] > signal[peaks[peaks.length-1]]){
+          peaks[peaks.length-1] = i;
+        }
+      }
+    }
+    return peaks;
+  }
+
+  // ---------- ANALYSIS ----------
+  function analyze(rawSamples){
+    if (!rawSamples || rawSamples.length < TARGET_FS * 8){
+      throw new Error('insufficient samples');
+    }
+    const { r, g, b, fs, n } = resampleUniform(rawSamples, TARGET_FS);
+
+    // Motion/quality proxy: frame-to-frame brightness jitter on raw (pre-detrend) green channel
+    let jitter = 0;
+    for (let i=1;i<g.length;i++) jitter += Math.abs(g[i]-g[i-1]);
+    jitter /= g.length;
+
+    const winSamples = Math.round(fs * 2); // ~2s detrend window
+    // Normalize by dividing by the DC (mean) level only — preserves the relative pulsatility
+    // ratios between channels that CHROM's fixed coefficients depend on. Full z-scoring (dividing
+    // by std) would erase that relative amplitude information and break the method.
+    const rMean = mean(r) || 1, gMean = mean(g) || 1, bMean = mean(b) || 1;
+    const rd = movingAverageDetrend(r, winSamples).map(v => v / rMean);
+    const gd = movingAverageDetrend(g, winSamples).map(v => v / gMean);
+    const bd = movingAverageDetrend(b, winSamples).map(v => v / bMean);
+
+    // CHROM method (de Haan & Jeanne, 2013)
+    const Xs = new Array(n), Ys = new Array(n);
+    for (let i=0;i<n;i++){
+      Xs[i] = 3*rd[i] - 2*gd[i];
+      Ys[i] = 1.5*rd[i] + gd[i] - 1.5*bd[i];
+    }
+    // Filter each combination to the plausible pulse band first, then combine (standard CHROM order)
+    const Xf = bandpass(Xs, fs, HR_BAND[0], HR_BAND[1]);
+    const Yf = bandpass(Ys, fs, HR_BAND[0], HR_BAND[1]);
+    const alpha = (std(Yf) > 1e-6) ? (std(Xf) / std(Yf)) : 1;
+    const pulseFiltered = Xf.map((x,i) => x - alpha*Yf[i]);
+
+    // Heart rate via FFT peak
+    const hrEst = dominantFrequency(pulseFiltered, fs, HR_BAND[0], HR_BAND[1]);
+    const heartRate = Math.round(hrEst.freqHz * 60);
+
+    // HRV via time-domain peak picking
+    // Constrain minimum peak spacing using the already-detected heart rate so that noise-driven
+    // sub-cycle ripple in the filtered waveform isn't miscounted as extra beats.
+    const peakMaxBpm = heartRate > 0 ? Math.min(220, heartRate * 1.6) : 200;
+    const peaks = findPeaks(pulseFiltered, fs, peakMaxBpm);
+    const ibis = [];
+    for (let i=1;i<peaks.length;i++){
+      const ms = (peaks[i]-peaks[i-1]) / fs * 1000;
+      if (ms >= 300 && ms <= 1500) ibis.push(ms);
+    }
+    // Camera-derived beat-to-beat timing is inherently noisier than ECG, so HRV is only reported
+    // when there are enough detected beats AND the result falls in a physiologically plausible
+    // range. Implausible values are treated as low-confidence rather than shown as a false number.
+    let rmssd = null, sdnn = null;
+    if (ibis.length >= 8){
+      const diffs = [];
+      for (let i=1;i<ibis.length;i++) diffs.push(ibis[i]-ibis[i-1]);
+      const rmssdCandidate = Math.sqrt(mean(diffs.map(d=>d*d)));
+      const sdnnCandidate = std(ibis);
+      if (rmssdCandidate <= 150 && sdnnCandidate <= 150){
+        rmssd = rmssdCandidate;
+        sdnn = sdnnCandidate;
+      }
+    }
+
+    // Respiration rate: low-frequency modulation of the (detrended, non-CHROM) green channel
+    const gForResp = movingAverageDetrend(g, Math.round(fs*8));
+    const respEst = dominantFrequency(gForResp, fs, RESP_BAND[0], RESP_BAND[1]);
+    const respWave = bandpass(gForResp, fs, RESP_BAND[0], RESP_BAND[1]);
+    const respirationRate = Math.round(respEst.freqHz * 60);
+
+    // Stress index heuristic (NOT clinical): lower HRV + elevated HR -> higher score
+    let stress = null;
+    if (rmssd !== null){
+      const hrvComponent = Math.max(0, Math.min(1, 1 - (rmssd / 80))); // 80ms treated as a relaxed reference
+      const hrComponent = Math.max(0, Math.min(1, (heartRate - 60) / 60)); // 60-120bpm range
+      stress = Math.round(Math.max(0, Math.min(100, (0.7*hrvComponent + 0.3*hrComponent) * 100)));
+    }
+
+    // Experimental SpO2 heuristic (ratio-of-ratios using red & blue AC/DC as an unvalidated proxy for red/infrared).
+    // This is illustrative only; ordinary RGB webcams cannot measure true SpO2, which requires an infrared channel.
+    const acDc = (channelRaw, channelDetrended) => (std(channelDetrended) / mean(channelRaw));
+    const redAcDc = acDc(r, bandpass(movingAverageDetrend(r, winSamples), fs, HR_BAND[0], HR_BAND[1]));
+    const blueAcDc = acDc(b, bandpass(movingAverageDetrend(b, winSamples), fs, HR_BAND[0], HR_BAND[1]));
+    const ratio = (blueAcDc > 1e-9) ? (redAcDc / blueAcDc) : 1;
+    let spo2 = Math.round(110 - 17*ratio);
+    spo2 = Math.max(90, Math.min(100, spo2));
+
+    // Signal quality score
+    const snr = hrEst.bandEnergy > 0 ? (hrEst.magnitude / hrEst.bandEnergy) : 0;
+    let quality = 'Poor';
+    if (snr > 0.35 && jitter < 6) quality = 'Good';
+    else if (snr > 0.18 && jitter < 12) quality = 'Fair';
+
+    return {
+      heartRate, rmssd, sdnn, respirationRate, stress, spo2, quality,
+      waveform: pulseFiltered, fs
+    };
+  }
+
+  // ---------- RENDER ----------
+  function tagFor(value, ranges){
+    // ranges: [{max, label, cls}] sorted ascending; last has max=Infinity
+    for (const r of ranges){ if (value <= r.max) return r; }
+    return ranges[ranges.length-1];
+  }
+
+  function renderReport(res){
+    document.getElementById('report-timestamp').textContent = new Date().toLocaleString();
+
+    document.getElementById('m-hr').textContent = res.heartRate || '—';
+    const hrTag = tagFor(res.heartRate, [
+      {max:59, label:'Below typical resting range', cls:'fair'},
+      {max:100, label:'Typical resting range', cls:'good'},
+      {max:999, label:'Above typical resting range', cls:'fair'},
+    ]);
+    setTag('m-hr-tag', hrTag);
+
+    document.getElementById('m-hrv').textContent = res.rmssd ? Math.round(res.rmssd) : '—';
+    if (res.rmssd){
+      const hrvTag = tagFor(res.rmssd, [
+        {max:20, label:'Low', cls:'poor'},
+        {max:50, label:'Moderate', cls:'fair'},
+        {max:9999, label:'High', cls:'good'},
+      ]);
+      setTag('m-hrv-tag', hrvTag);
+    } else { setTag('m-hrv-tag', {label:'Not enough data', cls:'poor'}); }
+
+    document.getElementById('m-rr').textContent = res.respirationRate || '—';
+    const rrTag = tagFor(res.respirationRate, [
+      {max:11, label:'Below typical range', cls:'fair'},
+      {max:20, label:'Typical range', cls:'good'},
+      {max:999, label:'Above typical range', cls:'fair'},
+    ]);
+    setTag('m-rr-tag', rrTag);
+
+    document.getElementById('m-stress').textContent = res.stress !== null ? res.stress : '—';
+    if (res.stress !== null){
+      const stressTag = tagFor(res.stress, [
+        {max:33, label:'Low', cls:'good'},
+        {max:66, label:'Moderate', cls:'fair'},
+        {max:100, label:'High', cls:'poor'},
+      ]);
+      setTag('m-stress-tag', stressTag);
+    } else { setTag('m-stress-tag', {label:'Not enough data', cls:'poor'}); }
+
+    document.getElementById('m-spo2').textContent = res.spo2 || '—';
+
+    const qDot = document.getElementById('quality-dot');
+    const qText = document.getElementById('quality-text');
+    const qColor = res.quality === 'Good' ? 'var(--good)' : (res.quality === 'Fair' ? 'var(--fair)' : 'var(--poor)');
+    qDot.style.background = qColor;
+    qText.textContent = `Signal quality: ${res.quality}`;
+
+    drawWaveform(res.waveform);
+  }
+
+  function setTag(id, tagInfo){
+    const el = document.getElementById(id);
+    el.textContent = tagInfo.label;
+    el.className = 'tag ' + (tagInfo.cls || '');
+  }
+
+  function drawWaveform(signal){
+    const canvas = document.getElementById('waveform');
+    const dpr = window.devicePixelRatio || 1;
+    const displayW = canvas.clientWidth || 600;
+    const displayH = 120;
+    canvas.width = displayW * dpr;
+    canvas.height = displayH * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0,0,displayW,displayH);
+
+    if (!signal || signal.length === 0) return;
+    const minV = Math.min(...signal), maxV = Math.max(...signal);
+    const range = (maxV - minV) || 1;
+
+    ctx.beginPath();
+    ctx.strokeStyle = '#4fd1c5';
+    ctx.lineWidth = 2;
+    const padding = 8;
+    for (let i=0;i<signal.length;i++){
+      const x = padding + (i/(signal.length-1)) * (displayW - 2*padding);
+      const y = displayH - padding - ((signal[i]-minV)/range) * (displayH - 2*padding);
+      if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    }
+    ctx.stroke();
+  }
+
+  // ---------- EVENTS ----------
+  btnStart.addEventListener('click', startCamera);
+  btnRetry.addEventListener('click', () => showScreen('intro'));
+  btnCancel.addEventListener('click', cancelScan);
+  btnRescan.addEventListener('click', () => showScreen('intro'));
+  btnPrint.addEventListener('click', () => window.print());
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    errorMsg.textContent = 'Your browser does not support camera access (getUserMedia). Please try a recent version of Chrome, Edge, Firefox, or Safari.';
+    showScreen('error');
+  } else {
+    showScreen('intro');
+  }
+})();
+</script>
+</body>
+</html>

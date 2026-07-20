@@ -11,6 +11,7 @@ NOT A MEDICAL DEVICE. Estimates only. See the in-app disclaimer.
 
 import threading
 import time
+from pathlib import Path
 
 import av
 import cv2
@@ -22,6 +23,89 @@ from vitals import analyze, resample_uniform
 
 SCAN_SECONDS_DEFAULT = 25
 TARGET_FS = 20  # samples/sec we resample onto for analysis (webcam delivers ~15-30fps)
+
+LOGO_PATH = Path(__file__).parent / "assets" / "cds-group-wordmark.png"
+
+# CDS brand tokens (from thecdsgroups.com): near-black canvas, indigo->purple->pink
+# accent gradient, Cabinet Grotesk/General Sans type.
+CDS_CSS = """
+<style>
+@import url('https://api.fontshare.com/v2/css?f[]=cabinet-grotesk@500,700&f[]=general-sans@400,500,600&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'General Sans', ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+
+.stApp {
+    background:
+        radial-gradient(60% 50% at 15% 0%, rgba(105, 95, 241, 0.25), transparent 60%),
+        radial-gradient(60% 50% at 85% 15%, rgba(239, 77, 180, 0.18), transparent 60%),
+        #07070D;
+}
+
+.cds-eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.9rem;
+    border-radius: 9999px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.04);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.12em;
+    color: #A7A7B4;
+    text-transform: uppercase;
+    margin-bottom: 1rem;
+}
+
+.cds-title {
+    font-family: 'Cabinet Grotesk', 'General Sans', ui-sans-serif, sans-serif;
+    font-weight: 500;
+    font-size: 2.6rem;
+    line-height: 1.1;
+    color: #FAFAFA;
+    margin-bottom: 0.5rem;
+}
+
+.cds-title .accent {
+    font-style: italic;
+    background: linear-gradient(135deg, #695FF1, #BC5AED, #EF4DB4);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.cds-subtitle {
+    color: #A7A7B4;
+    font-size: 1.05rem;
+    margin-bottom: 1.5rem;
+}
+
+div.stButton > button {
+    border-radius: 9999px !important;
+    font-weight: 600;
+    border: none;
+}
+
+div.stButton > button[kind="primary"] {
+    background: #FAFAFA !important;
+    color: #07070D !important;
+}
+
+div.stButton > button[kind="primary"]:hover {
+    background: #EAEAEA !important;
+    color: #07070D !important;
+}
+
+div[data-testid="stMetric"] {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 16px;
+    padding: 1rem;
+}
+</style>
+"""
 
 # ---------------------------------------------------------------------------
 # ICE servers for WebRTC NAT traversal. Google's public STUN server is enough
@@ -46,6 +130,78 @@ RTC_CONFIGURATION = RTCConfiguration(
 _FACE_CASCADE = cv2.CascadeClassifier(
     cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 )
+
+# Canonical relative positions (fraction of face box width/height) for a stylized
+# "scanning" mesh -- not real per-frame landmark detection (the Haar cascade only
+# gives a bounding box), but a fixed rig mapped onto that box so the overlay reads
+# like a face-mesh scanner instead of a static rectangle.
+_MESH_RATIOS = {
+    "forehead_l": (0.20, 0.15), "forehead_m": (0.50, 0.10), "forehead_r": (0.80, 0.15),
+    "temple_l": (0.08, 0.32), "temple_r": (0.92, 0.32),
+    "brow_l": (0.30, 0.34), "brow_r": (0.70, 0.34),
+    "eye_l": (0.32, 0.42), "eye_r": (0.68, 0.42),
+    "nose_bridge": (0.50, 0.44),
+    "nose_l": (0.42, 0.56), "nose_r": (0.58, 0.56), "nose_tip": (0.50, 0.59),
+    "cheek_l": (0.15, 0.56), "cheek_r": (0.85, 0.56),
+    "mouth_l": (0.35, 0.76), "mouth_r": (0.65, 0.76), "mouth_c": (0.50, 0.79),
+    "jaw_l": (0.20, 0.86), "jaw_r": (0.80, 0.86), "chin": (0.50, 0.93),
+}
+_MESH_EDGES = [
+    ("forehead_l", "forehead_m"), ("forehead_m", "forehead_r"),
+    ("forehead_l", "temple_l"), ("forehead_r", "temple_r"),
+    ("forehead_l", "brow_l"), ("forehead_r", "brow_r"),
+    ("forehead_m", "brow_l"), ("forehead_m", "brow_r"),
+    ("temple_l", "eye_l"), ("temple_r", "eye_r"),
+    ("brow_l", "eye_l"), ("brow_r", "eye_r"),
+    ("brow_l", "nose_bridge"), ("brow_r", "nose_bridge"),
+    ("eye_l", "nose_bridge"), ("eye_r", "nose_bridge"),
+    ("eye_l", "cheek_l"), ("eye_r", "cheek_r"),
+    ("temple_l", "cheek_l"), ("temple_r", "cheek_r"),
+    ("nose_bridge", "nose_l"), ("nose_bridge", "nose_r"),
+    ("nose_l", "nose_tip"), ("nose_r", "nose_tip"),
+    ("nose_l", "cheek_l"), ("nose_r", "cheek_r"),
+    ("nose_tip", "mouth_c"),
+    ("nose_l", "mouth_l"), ("nose_r", "mouth_r"),
+    ("cheek_l", "mouth_l"), ("cheek_r", "mouth_r"),
+    ("cheek_l", "jaw_l"), ("cheek_r", "jaw_r"),
+    ("mouth_l", "mouth_c"), ("mouth_r", "mouth_c"),
+    ("mouth_l", "jaw_l"), ("mouth_r", "jaw_r"),
+    ("mouth_c", "chin"), ("jaw_l", "chin"), ("jaw_r", "chin"),
+    ("eye_l", "eye_r"),
+    ("brow_l", "nose_r"), ("brow_r", "nose_l"),
+    ("mouth_l", "nose_r"), ("mouth_r", "nose_l"),
+]
+_MESH_PHASE = {name: i * 0.7 for i, name in enumerate(_MESH_RATIOS)}
+
+
+def _draw_scan_overlay(img, bbox, collecting: bool, t: float):
+    """Draws an animated face-mesh + radar-sweep overlay over the detected face
+    box: wobbling landmark dots joined by mesh lines, plus a rotating arc on the
+    surrounding ring, so the scan reads as "live" rather than a frozen rectangle.
+    """
+    fx, fy, fw, fh = bbox
+    accent = (237, 90, 188) if collecting else (255, 200, 150)  # BGR
+
+    cx, cy = fx + fw / 2, fy + fh / 2
+    axes = (int(fw * 0.62), int(fh * 0.68))
+    cv2.ellipse(img, (int(cx), int(cy)), axes, 0, 0, 360, accent, 1, cv2.LINE_AA)
+    sweep_deg = 70
+    start = (t * 140) % 360
+    cv2.ellipse(img, (int(cx), int(cy)), axes, 0, start, start + sweep_deg,
+                (255, 255, 255), 1, cv2.LINE_AA)
+
+    amp = 0.012 * fw
+    pts = {}
+    for name, (rx, ry) in _MESH_RATIOS.items():
+        phase = _MESH_PHASE[name]
+        wob_x = amp * np.sin(t * 2.2 + phase)
+        wob_y = amp * np.cos(t * 2.6 + phase)
+        pts[name] = (int(fx + rx * fw + wob_x), int(fy + ry * fh + wob_y))
+
+    for a, b in _MESH_EDGES:
+        cv2.line(img, pts[a], pts[b], accent, 1, cv2.LINE_AA)
+    for p in pts.values():
+        cv2.circle(img, p, 1, (255, 255, 255), -1, cv2.LINE_AA)
 
 
 class VitalsProcessor:
@@ -131,13 +287,8 @@ class VitalsProcessor:
                     with self.lock:
                         self.samples.append((time.time(), float(r_mean), float(g_mean), float(b_mean)))
 
-            # Draw overlay: face box + ROI + status text
-            color = (80, 209, 197) if collecting else (124, 156, 255)  # BGR-ish accent
-            cv2.rectangle(img, (fx, fy), (fx + fw, fy + fh), color, 2)
-            cv2.rectangle(img, (rx0, ry0), (rx1, ry1), (255, 200, 0), 2)
-            label = "Scanning..." if collecting else "Face detected - ready"
-            cv2.putText(img, label, (fx, max(20, fy - 10)), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6, color, 2, cv2.LINE_AA)
+            # Draw overlay: animated scan mesh + ring (ROI itself stays invisible)
+            _draw_scan_overlay(img, bbox, collecting, time.time())
         else:
             cv2.putText(img, "Align your face in view", (20, 30), cv2.FONT_HERSHEY_SIMPLEX,
                         0.7, (0, 165, 255), 2, cv2.LINE_AA)
@@ -194,8 +345,17 @@ def render_report(res: dict):
 
 def main():
     st.set_page_config(page_title="Face Vitals Scanner", page_icon="💓", layout="centered")
-    st.title("💓 Face Vitals Scanner")
-    st.caption("Camera-based wellness estimate — heart rate, HRV, respiration & stress")
+    st.markdown(CDS_CSS, unsafe_allow_html=True)
+    if LOGO_PATH.exists():
+        st.logo(str(LOGO_PATH), size="large")
+
+    st.markdown(
+        '<div class="cds-eyebrow">✦ rPPG · webcam-based · experimental</div>'
+        '<div class="cds-title">Face Vitals <span class="accent">Scanner</span></div>'
+        '<div class="cds-subtitle">Camera-based wellness estimate — heart rate, HRV, '
+        "respiration & stress</div>",
+        unsafe_allow_html=True,
+    )
 
     st.warning(
         "**Not a medical device.** This tool provides experimental, informational "
