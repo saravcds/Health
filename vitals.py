@@ -117,6 +117,63 @@ def chrom_pulse(r: np.ndarray, g: np.ndarray, b: np.ndarray, fs: float) -> np.nd
     return xf - alpha * yf
 
 
+def perfusion_index(raw_channel: np.ndarray, fs: float) -> float:
+    """Pulsatile (AC) amplitude of a raw channel as a percentage of its mean (DC)
+    level -- the same AC/DC definition clinical pulse oximeters use for perfusion
+    index. Camera-derived amplitude isn't on the same absolute scale as a
+    calibrated finger sensor, so this is a relative signal-strength indicator,
+    not a clinical percentage.
+    """
+    win_samples = round(fs * 2)
+    band = bandpass(moving_average_detrend(raw_channel, win_samples), fs, *HR_BAND)
+    ac = np.std(band)
+    dc = np.mean(raw_channel) or 1
+    return float(ac / dc * 100)
+
+
+def analyze_fatigue(times: np.ndarray, eyes_open: np.ndarray,
+                     min_blink_s: float = 0.08, max_blink_s: float = 0.6) -> dict:
+    """Blink rate and PERCLOS (% of time eyes are closed) from a per-frame
+    eyes-open/closed trace. `eyes_open` comes from Haar eye-cascade detections
+    (open when the cascade finds both eyes) -- a well-established low-cost
+    proxy for blink detection, not precise eyelid-aperture tracking.
+    """
+    times = np.asarray(times, dtype=float)
+    eyes_open = np.asarray(eyes_open, dtype=bool)
+    n = len(times)
+    if n < 20:
+        return {"blink_rate": None, "perclos": None, "n_frames": n}
+
+    duration = times[-1] - times[0]
+    closed = ~eyes_open
+
+    # Count closed runs whose duration falls in a plausible blink window --
+    # this excludes both single-frame detector noise and prolonged closures
+    # (looking down, eyes off-camera) from being counted as blinks.
+    blinks = 0
+    i = 0
+    while i < n:
+        if closed[i]:
+            j = i
+            while j < n and closed[j]:
+                j += 1
+            end_t = times[j] if j < n else times[n - 1]
+            run_dur = end_t - times[i]
+            if min_blink_s <= run_dur <= max_blink_s:
+                blinks += 1
+            i = j
+        else:
+            i += 1
+
+    perclos = float(np.mean(closed) * 100)
+    blink_rate = float(blinks / duration * 60) if duration > 0 else None
+    return {
+        "blink_rate": round(blink_rate, 1) if blink_rate is not None else None,
+        "perclos": round(perclos, 1),
+        "n_frames": n,
+    }
+
+
 def analyze(t: np.ndarray, r: np.ndarray, g: np.ndarray, b: np.ndarray, fs: float) -> dict:
     """Run the full pipeline on a uniformly-sampled window of ROI color traces.
 
@@ -181,6 +238,10 @@ def analyze(t: np.ndarray, r: np.ndarray, g: np.ndarray, b: np.ndarray, fs: floa
     ratio = (red_ac_dc / blue_ac_dc) if blue_ac_dc > 1e-9 else 1.0
     spo2 = int(np.clip(round(110 - 17 * ratio), 90, 100))
 
+    # Relative perfusion index from the green channel (most blood-volume-sensitive
+    # for an RGB sensor) -- a real measured amplitude, not a fabricated number.
+    perfusion = perfusion_index(g, fs)
+
     # Signal quality
     snr = (hr_est["magnitude"] / hr_est["band_energy"]) if hr_est["band_energy"] > 0 else 0
     if snr > 0.35 and jitter < 6:
@@ -197,6 +258,7 @@ def analyze(t: np.ndarray, r: np.ndarray, g: np.ndarray, b: np.ndarray, fs: floa
         "respiration_rate": respiration_rate,
         "stress": stress,
         "spo2": spo2,
+        "perfusion_index": round(perfusion, 2),
         "quality": quality,
         "waveform": pulse,
         "fs": fs,

@@ -19,7 +19,7 @@ import numpy as np
 import streamlit as st
 from streamlit_webrtc import RTCConfiguration, WebRtcMode, webrtc_streamer
 
-from vitals import analyze, resample_uniform
+from vitals import analyze, analyze_fatigue, resample_uniform
 
 SCAN_SECONDS_DEFAULT = 25
 TARGET_FS = 20  # samples/sec we resample onto for analysis (webcam delivers ~15-30fps)
@@ -130,6 +130,7 @@ RTC_CONFIGURATION = RTCConfiguration(
 _FACE_CASCADE = cv2.CascadeClassifier(
     cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 )
+_EYE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
 
 # Canonical relative positions (fraction of face box width/height) for a stylized
 # "scanning" mesh -- not real per-frame landmark detection (the Haar cascade only
@@ -218,6 +219,7 @@ class VitalsProcessor:
         self.scan_start = None
         self.scan_duration = SCAN_SECONDS_DEFAULT
         self.samples = []  # list of (t, r, g, b)
+        self.eye_samples = []  # list of (t, eyes_open)
         self._last_bbox = None
         self._stale_frames = 0
         self._frame_count = 0
@@ -228,17 +230,18 @@ class VitalsProcessor:
             self.scan_start = time.time()
             self.scan_duration = duration
             self.samples = []
+            self.eye_samples = []
 
     def snapshot(self):
-        """Returns (elapsed, duration, samples_copy, done)."""
+        """Returns (elapsed, duration, samples_copy, eye_samples_copy, done)."""
         with self.lock:
             if self.scan_start is None:
-                return 0.0, self.scan_duration, [], False
+                return 0.0, self.scan_duration, [], [], False
             elapsed = time.time() - self.scan_start
             done = elapsed >= self.scan_duration
             if done:
                 self.collecting = False
-            return elapsed, self.scan_duration, list(self.samples), done
+            return elapsed, self.scan_duration, list(self.samples), list(self.eye_samples), done
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
@@ -286,6 +289,20 @@ class VitalsProcessor:
                     b_mean, g_mean, r_mean = roi.reshape(-1, 3).mean(axis=0)
                     with self.lock:
                         self.samples.append((time.time(), float(r_mean), float(g_mean), float(b_mean)))
+
+                    # Eye-region crop for blink detection: upper-middle band of the face
+                    ex0, ex1 = max(0, fx + int(0.15 * fw)), min(w, fx + int(0.85 * fw))
+                    ey0, ey1 = max(0, fy + int(0.25 * fh)), min(h, fy + int(0.55 * fh))
+                    if ex1 > ex0 and ey1 > ey0:
+                        eye_gray = cv2.cvtColor(img[ey0:ey1, ex0:ex1], cv2.COLOR_BGR2GRAY)
+                        eye_size = max(15, int(0.12 * fw))
+                        eyes = _EYE_CASCADE.detectMultiScale(
+                            eye_gray, scaleFactor=1.1, minNeighbors=6,
+                            minSize=(eye_size, eye_size), maxSize=(int(0.4 * fw), int(0.4 * fw)),
+                        )
+                        eyes_open = len(eyes) >= 2
+                        with self.lock:
+                            self.eye_samples.append((time.time(), eyes_open))
 
             # Draw overlay: animated scan mesh + ring (ROI itself stays invisible)
             _draw_scan_overlay(img, bbox, collecting, time.time())
@@ -336,9 +353,36 @@ def render_report(res: dict):
             st.metric("Stress Index", "—")
             st.caption("Not enough clean signal")
 
-    st.metric("Estimated SpO2 (experimental)", f"{res['spo2']}%")
-    st.caption("Camera-based SpO2 is not clinically valid -- ordinary webcams lack "
-               "the infrared channel real pulse oximeters use. Shown for illustration only.")
+    c5, c6 = st.columns(2)
+    with c5:
+        st.metric("Estimated SpO2 (experimental)", f"{res['spo2']}%")
+        st.caption("Not clinically valid -- ordinary webcams lack the infrared "
+                   "channel real pulse oximeters use. Illustration only.")
+    with c6:
+        st.metric("Perfusion Index (relative)", f"{res['perfusion_index']:.2f}%")
+        st.caption("Relative strength of the detected pulse signal, not a "
+                   "calibrated clinical value -- useful mainly as a scan-quality check.")
+
+    fatigue = res.get("fatigue")
+    c7, c8 = st.columns(2)
+    with c7:
+        if fatigue and fatigue["blink_rate"] is not None:
+            st.metric("Blink Rate", f"{fatigue['blink_rate']:.0f}/min")
+            st.caption(tag_for(fatigue["blink_rate"], [(9, "Low"), (20, "Typical"),
+                                                        (999, "Elevated — possible fatigue/eye strain")]))
+        else:
+            st.metric("Blink Rate", "—")
+            st.caption("Not enough clean signal")
+    with c8:
+        if fatigue and fatigue["perclos"] is not None:
+            st.metric("PERCLOS (eye closure)", f"{fatigue['perclos']:.1f}%")
+            st.caption(tag_for(fatigue["perclos"], [(10, "Low"), (15, "Borderline"),
+                                                     (100, "Elevated — possible drowsiness signal")]))
+        else:
+            st.metric("PERCLOS (eye closure)", "—")
+            st.caption("Not enough clean signal")
+    st.caption("Blink rate/PERCLOS come from eye-cascade presence/absence, not precise "
+               "eyelid tracking -- an informational fatigue signal, not a diagnosis.")
 
     st.line_chart(res["waveform"], height=180, use_container_width=True)
 
@@ -426,7 +470,7 @@ def _poll_scan(ctx, status, progress):
     progress bar, and runs the analysis exactly once when the scan window ends."""
     if not ctx.video_processor:
         return
-    elapsed, duration, samples, done = ctx.video_processor.snapshot()
+    elapsed, duration, samples, eye_samples, done = ctx.video_processor.snapshot()
 
     if elapsed == 0.0 and not samples:
         status.caption("Align your face, then click **Start Scan**.")
@@ -451,6 +495,11 @@ def _poll_scan(ctx, status, progress):
         b = np.array([s[3] for s in samples])
         t_u, r_u, g_u, b_u = resample_uniform(t, r, g, b, TARGET_FS)
         result = analyze(t_u, r_u, g_u, b_u, TARGET_FS)
+
+        eye_t = np.array([s[0] for s in eye_samples])
+        eye_open = np.array([s[1] for s in eye_samples])
+        result["fatigue"] = analyze_fatigue(eye_t, eye_open)
+
         st.session_state.report = result
         status.caption("Done — see your report below.")
     except Exception as e:
